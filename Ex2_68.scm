@@ -90,6 +90,7 @@
   (cond ((null? set) #f)
 	((eq? (car set) symbol) #t)
 	(else (contains (cdr set) symbol))))
+
 (define tree
   (make-code-tree
    (make-code-tree (make-leaf 'E 1)
