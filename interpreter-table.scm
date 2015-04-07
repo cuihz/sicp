@@ -1,29 +1,102 @@
+;; table define
+(define (make-table)
+  (let ((local-table (list '*table*)))
+    (define (assoc key records)
+      (cond ((null? records) #f)
+	    ((equal? key (caar records)) (car records))
+	    (else (assoc key (cdr records)))))
+    (define (lookup key)
+      (let ((record (assoc key (cdr local-table))))
+	(if record
+	    (cdr record)
+	    #f)))
+    (define (insert! key value)
+      (let ((record (assoc key (cdr local-table))))
+	(if record
+	    (set-cdr! record value)
+	    (set-cdr! local-table
+		      (cons (cons key value) (cdr local-table)))))
+      'ok)
+    (define (print)
+      (define (print-iter records)
+	(if (not (null? records))
+	    (begin (display "key : ")
+		   (display (caar records))
+		   (display "-->")
+		   (display "value : ")
+		   (display (cdar records))
+		   (newline)
+		   (print-iter (cdr records)))))
+      (print-iter (cdr local-table)))
+    (define (dispatch m)
+      (cond ((eq? m 'lookup-proc) lookup)
+	    ((eq? m 'insert-proc) insert!)
+	    ((eq? m 'print-proc) print)
+	    (else (error "Unknown operation -- TABLE" m))))
+    dispatch))
 
-;; evaln内核
+(define operation-table (make-table))
+(define get (operation-table 'lookup-proc))
+(define put (operation-table 'insert-proc))
+(define print-table (operation-table 'print-proc))
+
+(define (eval-if exp env)
+  (if (true? (evaln (if-predicate exp) env))
+      (evaln (if-consequent exp) env)
+      (evaln (if-alternative exp) env)))
+
+(define (eval-definition exp env)
+  (define-variable! (definition-variable exp)
+		    (evaln (definition-value exp) env)
+		    env)
+  'ok)
+
+(define (eval-assignment exp env)
+  (set-variable-value! (assignment-variable exp)
+		       (evaln (assignment-value exp) env)
+		       env)
+  'ok)
+
+(define (put-method-to-table)
+  (put 'quote (lambda (exp env)
+		(text-of-quotation exp)))
+  (put 'set eval-assignment)
+  (put 'define eval-definition)
+  (put 'if eval-if)
+  (put 'and (lambda (exp env)
+	      (eval-and (and-clauses exp) env)))
+  (put 'or (lambda (exp env)
+	     (eval-or (or-clauses exp) env)))
+  (put 'lambda (lambda (exp env)
+		 (make-procedure (lambda-parameters exp)
+				 (lambda-body exp)
+				 env)))
+  (put 'begin (lambda (exp env)
+		(eval-sequence (begin-actions exp)
+			       env)))
+  (put 'cond (lambda (exp env)
+	       (evaln (cond-if exp) env)))
+  (put 'let (lambda (exp env)
+	      (evaln (let->combination exp) env)))
+  (put 'let* (lambda (exp env)
+	       (evaln (let*->nested-lets exp) env))))
+
+(put-method-to-table)
+
+(print-table)
+
 (define (evaln exp env)
+  "头两个不是taglist得单独来 "
   (cond ((self-evaluating? exp) exp)
 	((variables? exp) (lookup-variable-value exp env))
-	((quoted? exp) (text-of-quotation exp))
-	((assignment? exp) (eval-assignment exp env))
-	((definition? exp) (eval-definition exp env))
-	((if? exp) (eval-if exp env))
-	((and? exp) (eval-and (and-clauses exp) env))
-	((or? exp) (eval-or (or-clauses exp) env))
-	((lambda? exp)
-	 (make-procedure (lambda-parameters exp)
-			 (lambda-body exp)
-			 env))
-	((begin? exp)
-	 (eval-sequence (begin-actions exp) env))
-	((cond? exp) (evaln (cond-if exp) env))
-	((let? exp) (evaln (let->combination exp) env))
+	((get (car exp)) => (lambda (opertor)
+			      (operator exp env)))
 	((application? exp)
 	 (applyn (evaln (operator exp) env)
-		(list-of-values (operands exp) env)))
+		 (list-of-values (operands exp) env)))
 	(else
 	 (error "Unknown expression type -- EVAL" exp))))
 
-;; applyn内核
 (define (applyn procedure arguments)
   (cond ((primitive-procedure? procedure)
 	 (apply-primitive-procedure procedure arguments))
@@ -37,41 +110,6 @@
 	(else
 	 (error "Unknown procedure type -- APPLY" procedure))))
 
-;; 求一组表达式的值
-(define (list-of-values exps env)
-  (if (no-operands? exps)
-      '()
-      (cons (evaln (first-operand exps) env)
-	    (list-of-values (rest-operands exps) env))))
-
-;; eval-if
-(define (eval-if exp env)
-  (if (true? (evaln (if-predicate exp) env))
-      (evaln (if-consequent exp) env)
-      (evaln (if-alternative exp) env)))
-
-;; 按顺序运行一序列表达式
-(define (eval-sequence exps env)
-  (cond ((last-exp? exps) (evaln (first-exp exps) env))
-	(else (evaln (first-exp exps) env)
-	      (eval-sequence (rest-exps exps) env))))
-
-;; 变量赋值
-(define (eval-assignment exp env)
-  (set-variable-value! (assignment-variable exp)
-		       (evaln (assignment-value exp) env)
-		       env)
-  'ok)
-
-;; 变量定义
-(define (eval-definition exp env)
-  (define-variable! (definition-variable exp)
-		    (evaln (definition-value exp) env)
-		    env)
-  'ok)
-
-;; 语法分析
-;; 数字和字符串自求值
 (define (self-evaluating? exp)
   (cond ((number? exp) #t)
 	((string? exp) #t)
@@ -79,24 +117,21 @@
 
 (define (variables? exp) (symbol? exp))
 
-(define (quoted? exp) (tagged-list? exp 'quote))
+;; 求一组表达式的值
+(define (list-of-values exps env)
+  (if (no-operands? exps)
+      '()
+      (cons (evaln (first-operand exps) env)
+	    (list-of-values (rest-operands exps) env))))
 
-(define (text-of-quotation exp) (cadr exp))
-
-(define (tagged-list? exp tag)
-  (if (pair? exp)
-      (eq? (car exp) tag)
-      #f))
-
-(define (assignment? exp)
-  (tagged-list? exp 'set!))
+(define (eval-sequence exps env)
+  (cond ((last-exp? exps) (evaln (first-exp exps) env))
+	(else (evaln (first-exp exps) env)
+	      (eval-sequence (rest-exps exps) env))))
 
 (define (assignment-variable exp) (cadr exp))
 
 (define (assignment-value exp) (caddr exp))
-
-(define (definition? exp)
-  (tagged-list? exp 'define))
 
 (define (definition-variable exp)
   (if (symbol? (cadr exp))
@@ -109,17 +144,12 @@
       (make-lambda (cdadr exp)
 		   (cddr exp))))
 
-(define (lambda? exp)
-  (tagged-list? exp 'lambda))
-
 (define (lambda-parameters exp) (cadr exp))
 
 (define (lambda-body exp) (cddr exp))
 
 (define (make-lambda parameters body)
   (cons 'lambda (cons parameters body)))
-
-(define (if? exp) (tagged-list? exp 'if))
 
 (define (if-predicate exp) (cadr exp))
 
@@ -132,8 +162,6 @@
 
 (define (make-if predicate consequent alternative)
   (list 'if predicate consequent alternative))
-
-(define (begin? exp) (tagged-list? exp 'begin))
 
 (define (begin-actions exp) (cdr exp))
 
@@ -161,8 +189,6 @@
 (define (first-operand ops) (car ops))
 
 (define (rest-operands ops) (cdr ops))
-
-(define (cond? exp) (tagged-list? exp 'cond))
 
 (define (cond-clauses exp) (cdr exp))
 
@@ -201,15 +227,11 @@
 			(sequence->exp (cond-actions first))
 			(expand-clauses rest)))))))
 
-(define (let? expr) (tagged-list? expr 'let))
-
 (define (let-vars expr) (map car (cadr expr)))
 
 (define (let-inits expr) (map cadr (cadr expr)))
 
 (define (let-body expr) (cddr expr))
-
-(define (let*? expr) (tagged-list? expr 'let*))
 
 (define (let*-body expr) (caddr expr))
 
@@ -224,8 +246,6 @@
 	  (list 'let (list (car exprs)) (make-lets (cdr exprs)))))
     (make-lets inits)))
 
-(define (and? expr) (tagged-list? expr 'and))
-
 (define (and-clauses expr) (cdr expr))
 
 (define (eval-and exprs env)
@@ -235,8 +255,6 @@
 	  (else (if v
 		    (eval-and (rest-exps exprs) env)
 		    #f)))))
-
-(define (or? expr) (tagged-list? expr 'or))
 
 (define (or-clauses expr) (cdr expr))
 
@@ -421,6 +439,3 @@
       (display object)))
 
 (driver-loop)
-
-
-
